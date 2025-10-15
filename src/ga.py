@@ -183,11 +183,14 @@ class Genome:
     activation: str
 
     def crossover(self, other: "Genome") -> "Genome":
-        """Performs uniform crossover between two parents."""
+        """Performs uniform crossover between two parents with 50% mixing."""
 
         params = {}
         for field_name in self.__dataclass_fields__:
-            params[field_name] = random.choice([getattr(self, field_name), getattr(other, field_name)])
+            if random.random() < 0.5:
+                params[field_name] = getattr(self, field_name)
+            else:
+                params[field_name] = getattr(other, field_name)
         return Genome(**params)
 
     def mutate(self, mutation_rate: float = 0.1) -> "Genome":
@@ -222,13 +225,19 @@ class EvaluationLogger:
         self.dataset_slugs = {dataset.name: _slugify(dataset.name) for dataset in datasets}
         self.hyperparameter_fields = list(Genome.__dataclass_fields__.keys())
 
-        self.initial_detail_files = {
-            dataset.name: self.output_dir / f"initial_{self.dataset_slugs[dataset.name]}_details.csv"
-            for dataset in datasets
+        self.kfold_detail_files = {
+            stage: {
+                dataset.name: self.output_dir / f"{stage}_{self.dataset_slugs[dataset.name]}_details.csv"
+                for dataset in datasets
+            }
+            for stage in ("initial", "final")
         }
-        self.initial_confusion_files = {
-            dataset.name: self.output_dir / f"initial_{self.dataset_slugs[dataset.name]}_confusion.csv"
-            for dataset in datasets
+        self.kfold_confusion_files = {
+            stage: {
+                dataset.name: self.output_dir / f"{stage}_{self.dataset_slugs[dataset.name]}_confusion.csv"
+                for dataset in datasets
+            }
+            for stage in ("initial", "final")
         }
         self.overall_file = self.output_dir / "overall_results.csv"
 
@@ -244,8 +253,9 @@ class EvaluationLogger:
             writer = csv.writer(file)
             writer.writerow(row)
 
-    def log_initial_fold(
+    def log_kfold_fold(
         self,
+        stage: str,
         dataset: DatasetInfo,
         generation: int,
         individual_index: int,
@@ -253,9 +263,12 @@ class EvaluationLogger:
         genome: Genome,
         metrics: EvaluationMetrics,
     ) -> None:
-        """Persists per-fold metrics for the initial generation."""
+        """Persists per-fold metrics for the specified k-fold evaluation stage."""
 
-        detail_path = self.initial_detail_files[dataset.name]
+        if stage not in self.kfold_detail_files:
+            raise ValueError(f"Unsupported logging stage '{stage}' for k-fold results.")
+
+        detail_path = self.kfold_detail_files[stage][dataset.name]
         if not detail_path.exists():
             header = [
                 "generation",
@@ -281,7 +294,7 @@ class EvaluationLogger:
         ]
         self._append_row(detail_path, row)
 
-        confusion_path = self.initial_confusion_files[dataset.name]
+        confusion_path = self.kfold_confusion_files[stage][dataset.name]
         if not confusion_path.exists():
             confusion_header = [
                 "generation",
@@ -374,6 +387,8 @@ class Evaluator:
         individual_index: int,
         total_individuals: int,
         use_kfold: bool,
+        evaluation_stage: str = "regular",
+        log_results: bool = True,
     ) -> Dict[str, EvaluationMetrics]:
         """Evaluates ``genome`` and returns aggregated metrics per dataset."""
 
@@ -407,7 +422,8 @@ class Evaluator:
                             flush=True,
                         )
                         if self.logger:
-                            self.logger.log_initial_fold(
+                            self.logger.log_kfold_fold(
+                                stage=evaluation_stage,
                                 dataset=dataset,
                                 generation=generation,
                                 individual_index=individual_index,
@@ -461,7 +477,7 @@ class Evaluator:
 
             metrics_by_dataset[dataset.name] = aggregated
 
-        if self.logger:
+        if self.logger and log_results:
             self.logger.log_overall(
                 generation=generation,
                 individual_index=individual_index,
@@ -541,10 +557,11 @@ def _compute_crowding_distance(front: Sequence[Individual]) -> None:
             front_sorted[i].crowding_distance += distance
 
 
-def _select_tournament(population: Sequence[Individual]) -> Individual:
-    """Performs binary tournament selection based on rank and crowding distance."""
+def _select_tournament(population: Sequence[Individual], tournament_size: int = 2) -> Individual:
+    """Performs tournament selection based on rank and crowding distance."""
 
-    contenders = random.sample(population, 2)
+    tournament_size = max(1, min(tournament_size, len(population)))
+    contenders = random.sample(population, tournament_size)
     contenders.sort(key=lambda ind: (ind.rank, -ind.crowding_distance))
     return contenders[0]
 
@@ -556,16 +573,16 @@ class NSGA2:
         self,
         datasets: Sequence[DatasetInfo],
         population_size: int = 30,
-        num_generations: int = 10,
+        num_generations: int = 30,
         seed: int = 42,
         output_dir: str = "results",
     ) -> None:
         self.datasets = datasets
         self.population_size = population_size
-        self.num_generations = min(num_generations, 100)
-        if num_generations > 100:
+        self.num_generations = min(num_generations, 30)
+        if num_generations > 30:
             print(
-                f"Requested {num_generations} generations but limiting to 100 per specification.",
+                f"Requested {num_generations} generations but limiting to 30 per specification.",
                 flush=True,
             )
         self.random = random.Random(seed)
@@ -585,11 +602,16 @@ class NSGA2:
         population: Iterable[Individual],
         generation: int,
         use_kfold: bool,
+        evaluation_stage: str = "regular",
+        log_results: bool = True,
+        force: bool = False,
     ) -> None:
         if not isinstance(population, list):
             population = list(population)
         total_individuals = len(population)
         for index, individual in enumerate(population):
+            if force:
+                individual.fitness = None
             if individual.fitness is None:
                 metrics_by_dataset = self.evaluator.evaluate(
                     genome=individual.genome,
@@ -597,6 +619,8 @@ class NSGA2:
                     individual_index=index,
                     total_individuals=total_individuals,
                     use_kfold=use_kfold,
+                    evaluation_stage=evaluation_stage,
+                    log_results=log_results,
                 )
                 fitness = tuple(
                     metrics_by_dataset[dataset.name].accuracy for dataset in self.datasets
@@ -607,21 +631,33 @@ class NSGA2:
         """Executes the NSGA-II loop and returns the final population."""
 
         population = self._initial_population()
-        self._evaluate_population(population, generation=0, use_kfold=True)
+        self._evaluate_population(
+            population,
+            generation=0,
+            use_kfold=True,
+            evaluation_stage="initial",
+        )
 
         for generation in range(1, self.num_generations + 1):
+            is_final_generation = generation == self.num_generations
             fronts = _non_dominated_sort(population)
             for front in fronts:
                 _compute_crowding_distance(front)
 
             offspring: List[Individual] = []
             while len(offspring) < self.population_size:
-                parent1 = _select_tournament(population)
-                parent2 = _select_tournament(population)
+                parent1 = _select_tournament(population, tournament_size=3)
+                parent2 = _select_tournament(population, tournament_size=3)
                 child_genome = parent1.genome.crossover(parent2.genome).mutate(mutation_rate=0.1)
                 offspring.append(Individual(genome=child_genome))
 
-            self._evaluate_population(offspring, generation=generation, use_kfold=False)
+            self._evaluate_population(
+                offspring,
+                generation=generation,
+                use_kfold=False,
+                evaluation_stage="evolution",
+                log_results=not is_final_generation,
+            )
 
             combined = population + offspring
             fronts = _non_dominated_sort(combined)
@@ -637,5 +673,21 @@ class NSGA2:
                     break
 
             population = new_population
+
+        print(
+            (
+                f"Re-evaluating final generation ({self.num_generations}) with 5-fold cross-validation "
+                "for definitive fitness scores..."
+            ),
+            flush=True,
+        )
+        self._evaluate_population(
+            population,
+            generation=self.num_generations,
+            use_kfold=True,
+            evaluation_stage="final",
+            log_results=True,
+            force=True,
+        )
 
         return population
