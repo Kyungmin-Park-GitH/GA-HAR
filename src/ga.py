@@ -4,15 +4,15 @@ from __future__ import annotations
 import csv
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 import torch
 
 from .data_utils import DatasetInfo
-from .training import EvaluationMetrics, TrainingConfig, evaluate_single_split, evaluate_with_kfold
+from .training import EvaluationMetrics, TrainingConfig, evaluate_with_kfold
 
 
 HYPERPARAMETER_SPACE: Dict[str, Sequence] = {
@@ -214,8 +214,30 @@ class Genome:
         return Genome(**params)
 
 
+@dataclass
+class Individual:
+    """Wraps a genome and stores evaluation results."""
+
+    genome: Genome
+    fitness: Tuple[float, float] | None = None
+    crowding_distance: float = 0.0
+    rank: int = math.inf
+    metrics_by_dataset: Dict[str, EvaluationMetrics] = field(default_factory=dict)
+    fold_metrics_by_dataset: Dict[str, Tuple[EvaluationMetrics, ...]] = field(default_factory=dict)
+
+    def clone(self) -> "Individual":
+        return Individual(
+            genome=self.genome,
+            fitness=self.fitness,
+            crowding_distance=self.crowding_distance,
+            rank=self.rank,
+            metrics_by_dataset=self.metrics_by_dataset.copy(),
+            fold_metrics_by_dataset=self.fold_metrics_by_dataset.copy(),
+        )
+
+
 class EvaluationLogger:
-    """Handles writing evaluation results to CSV files in real time."""
+    """Handles writing evaluation results to CSV files after each generation."""
 
     def __init__(self, output_dir: str, datasets: Sequence[DatasetInfo]) -> None:
         self.output_dir = Path(output_dir)
@@ -225,21 +247,19 @@ class EvaluationLogger:
         self.dataset_slugs = {dataset.name: _slugify(dataset.name) for dataset in datasets}
         self.hyperparameter_fields = list(Genome.__dataclass_fields__.keys())
 
-        self.kfold_detail_files = {
-            stage: {
-                dataset.name: self.output_dir / f"{stage}_{self.dataset_slugs[dataset.name]}_details.csv"
-                for dataset in datasets
-            }
-            for stage in ("initial", "final")
+        self.detail_files = {
+            dataset.name: self.output_dir / f"{self.dataset_slugs[dataset.name]}_details.csv"
+            for dataset in datasets
         }
-        self.kfold_confusion_files = {
-            stage: {
-                dataset.name: self.output_dir / f"{stage}_{self.dataset_slugs[dataset.name]}_confusion.csv"
-                for dataset in datasets
-            }
-            for stage in ("initial", "final")
+        self.confusion_files = {
+            dataset.name: self.output_dir / f"{self.dataset_slugs[dataset.name]}_confusion.csv"
+            for dataset in datasets
         }
         self.overall_file = self.output_dir / "overall_results.csv"
+
+        for path in [*self.detail_files.values(), *self.confusion_files.values(), self.overall_file]:
+            if path.exists():
+                path.unlink()
 
     @staticmethod
     def _write_header(path: Path, header: Sequence[str]) -> None:
@@ -253,77 +273,42 @@ class EvaluationLogger:
             writer = csv.writer(file)
             writer.writerow(row)
 
-    def log_kfold_fold(
-        self,
-        stage: str,
-        dataset: DatasetInfo,
-        generation: int,
-        individual_index: int,
-        fold_index: int,
-        genome: Genome,
-        metrics: EvaluationMetrics,
-    ) -> None:
-        """Persists per-fold metrics for the specified k-fold evaluation stage."""
+    def log_generation(self, generation: int, individuals: Sequence[Individual]) -> None:
+        """Writes per-fold and aggregated metrics for the selected individuals."""
 
-        if stage not in self.kfold_detail_files:
-            raise ValueError(f"Unsupported logging stage '{stage}' for k-fold results.")
+        if not individuals:
+            return
 
-        detail_path = self.kfold_detail_files[stage][dataset.name]
-        if not detail_path.exists():
-            header = [
-                "generation",
-                "individual",
-                "fold",
-                *self.hyperparameter_fields,
-                "accuracy",
-                "recall",
-                "precision",
-                "f1_score",
-            ]
-            self._write_header(detail_path, header)
+        sorted_individuals = sorted(individuals, key=lambda ind: (ind.rank, -ind.crowding_distance))
 
-        row = [
-            generation,
-            individual_index + 1,
-            fold_index + 1,
-            *[getattr(genome, field) for field in self.hyperparameter_fields],
-            f"{metrics.accuracy:.6f}",
-            f"{metrics.recall:.6f}",
-            f"{metrics.precision:.6f}",
-            f"{metrics.f1:.6f}",
-        ]
-        self._append_row(detail_path, row)
+        for dataset in self.datasets:
+            detail_path = self.detail_files[dataset.name]
+            if not detail_path.exists():
+                header = [
+                    "generation",
+                    "individual",
+                    "fold",
+                    *self.hyperparameter_fields,
+                    "accuracy",
+                    "recall",
+                    "precision",
+                    "f1_score",
+                ]
+                self._write_header(detail_path, header)
 
-        confusion_path = self.kfold_confusion_files[stage][dataset.name]
-        if not confusion_path.exists():
-            confusion_header = [
-                "generation",
-                "individual",
-                "fold",
-                *[
-                    f"cm_{i}_{j}"
-                    for i in range(dataset.num_classes)
-                    for j in range(dataset.num_classes)
-                ],
-            ]
-            self._write_header(confusion_path, confusion_header)
-
-        confusion_row = [
-            generation,
-            individual_index + 1,
-            fold_index + 1,
-            *metrics.confusion_matrix.astype(int).flatten().tolist(),
-        ]
-        self._append_row(confusion_path, confusion_row)
-
-    def log_overall(
-        self,
-        generation: int,
-        individual_index: int,
-        genome: Genome,
-        metrics_by_dataset: Mapping[str, EvaluationMetrics],
-    ) -> None:
-        """Logs the aggregated metrics for an evaluated individual."""
+            confusion_path = self.confusion_files[dataset.name]
+            if not confusion_path.exists():
+                confusion_header = [
+                    "generation",
+                    "individual",
+                    "fold",
+                    *[
+                        f"cm_{i}_{j}"
+                        for i in range(dataset.num_classes)
+                        for j in range(dataset.num_classes)
+                    ],
+                ]
+                self._write_header(confusion_path, confusion_header)
 
         if not self.overall_file.exists():
             header = ["generation", "individual", *self.hyperparameter_fields]
@@ -339,32 +324,63 @@ class EvaluationLogger:
                 )
             self._write_header(self.overall_file, header)
 
-        row: List[object] = [generation, individual_index + 1]
-        row.extend(getattr(genome, field) for field in self.hyperparameter_fields)
-        for dataset in self.datasets:
-            metrics = metrics_by_dataset[dataset.name]
-            row.extend(
-                [
-                    f"{metrics.accuracy:.6f}",
-                    f"{metrics.recall:.6f}",
-                    f"{metrics.precision:.6f}",
-                    f"{metrics.f1:.6f}",
+        for rank_index, individual in enumerate(sorted_individuals, start=1):
+            if not individual.metrics_by_dataset or not individual.fold_metrics_by_dataset:
+                raise RuntimeError(
+                    "Evaluation results missing for an individual despite being selected."
+                )
+
+            for dataset in self.datasets:
+                fold_metrics = individual.fold_metrics_by_dataset.get(dataset.name)
+                if not fold_metrics:
+                    continue
+
+                detail_row_prefix = [
+                    generation,
+                    rank_index,
+                    None,  # placeholder for fold index
+                    *[getattr(individual.genome, field) for field in self.hyperparameter_fields],
                 ]
-            )
 
-        self._append_row(self.overall_file, row)
+                confusion_row_prefix = [
+                    generation,
+                    rank_index,
+                    None,
+                ]
 
-@dataclass
-class Individual:
-    """Wraps a genome and stores evaluation results."""
+                for fold_index, metrics in enumerate(fold_metrics, start=1):
+                    detail_row = detail_row_prefix.copy()
+                    detail_row[2] = fold_index
+                    detail_row.extend(
+                        [
+                            f"{metrics.accuracy:.6f}",
+                            f"{metrics.recall:.6f}",
+                            f"{metrics.precision:.6f}",
+                            f"{metrics.f1:.6f}",
+                        ]
+                    )
+                    self._append_row(self.detail_files[dataset.name], detail_row)
 
-    genome: Genome
-    fitness: Tuple[float, float] | None = None
-    crowding_distance: float = 0.0
-    rank: int = math.inf
+                    confusion_row = confusion_row_prefix.copy()
+                    confusion_row[2] = fold_index
+                    confusion_row.extend(metrics.confusion_matrix.astype(int).flatten().tolist())
+                    self._append_row(self.confusion_files[dataset.name], confusion_row)
 
-    def clone(self) -> "Individual":
-        return Individual(genome=self.genome, fitness=self.fitness, crowding_distance=self.crowding_distance, rank=self.rank)
+            overall_row: List[object] = [generation, rank_index]
+            overall_row.extend(getattr(individual.genome, field) for field in self.hyperparameter_fields)
+            for dataset in self.datasets:
+                metrics = individual.metrics_by_dataset.get(dataset.name)
+                if metrics is None:
+                    continue
+                overall_row.extend(
+                    [
+                        f"{metrics.accuracy:.6f}",
+                        f"{metrics.recall:.6f}",
+                        f"{metrics.precision:.6f}",
+                        f"{metrics.f1:.6f}",
+                    ]
+                )
+            self._append_row(self.overall_file, overall_row)
 
 
 class Evaluator:
@@ -374,11 +390,9 @@ class Evaluator:
         self,
         datasets: Sequence[DatasetInfo],
         device: torch.device,
-        logger: EvaluationLogger | None,
     ) -> None:
         self.datasets = datasets
         self.device = device
-        self.logger = logger
 
     def evaluate(
         self,
@@ -386,11 +400,8 @@ class Evaluator:
         generation: int,
         individual_index: int,
         total_individuals: int,
-        use_kfold: bool,
-        evaluation_stage: str = "regular",
-        log_results: bool = True,
-    ) -> Dict[str, EvaluationMetrics]:
-        """Evaluates ``genome`` and returns aggregated metrics per dataset."""
+    ) -> Tuple[Dict[str, EvaluationMetrics], Dict[str, Tuple[EvaluationMetrics, ...]]]:
+        """Evaluates ``genome`` and returns aggregated and per-fold metrics."""
 
         config = TrainingConfig(
             learning_rate=genome.learning_rate,
@@ -403,89 +414,42 @@ class Evaluator:
         )
 
         metrics_by_dataset: Dict[str, EvaluationMetrics] = {}
+        fold_metrics_by_dataset: Dict[str, Tuple[EvaluationMetrics, ...]] = {}
         for dataset in self.datasets:
-            if use_kfold:
-                def progress_callback(event: str, fold_index: int, metrics: EvaluationMetrics | None) -> None:
-                    prefix = (
-                        f"[Generation {generation:03d}] Individual {individual_index + 1:02d}/"
-                        f"{total_individuals:02d} - Dataset '{dataset.name}' Fold {fold_index + 1}/5"
-                    )
-                    if event == "start":
-                        print(f"{prefix}: training...", flush=True)
-                    elif metrics is not None:
-                        print(
-                            (
-                                f"{prefix} complete: acc={metrics.accuracy:.4f}, "
-                                f"recall={metrics.recall:.4f}, precision={metrics.precision:.4f}, "
-                                f"f1={metrics.f1:.4f}"
-                            ),
-                            flush=True,
-                        )
-                        if self.logger:
-                            self.logger.log_kfold_fold(
-                                stage=evaluation_stage,
-                                dataset=dataset,
-                                generation=generation,
-                                individual_index=individual_index,
-                                fold_index=fold_index,
-                                genome=genome,
-                                metrics=metrics,
-                            )
-
-                fold_metrics = evaluate_with_kfold(
-                    config=config,
-                    inputs=dataset.train.samples,
-                    labels=dataset.train.labels,
-                    test_inputs=dataset.test.samples,
-                    test_labels=dataset.test.labels,
-                    num_classes=dataset.num_classes,
-                    device=self.device,
-                    folds=5,
-                    progress_callback=progress_callback,
+            def progress_callback(event: str, fold_index: int, metrics: EvaluationMetrics | None) -> None:
+                prefix = (
+                    f"[Generation {generation:03d}] Individual {individual_index + 1:02d}/"
+                    f"{total_individuals:02d} - Dataset '{dataset.name}' Fold {fold_index + 1}/5"
                 )
-                aggregated = EvaluationMetrics.average(fold_metrics)
-            else:
-                print(
-                    (
-                        f"[Generation {generation:03d}] Individual {individual_index + 1:02d}/"
-                        f"{total_individuals:02d} - Dataset '{dataset.name}': training..."
-                    ),
-                    flush=True,
-                )
-
-                def single_callback(metrics: EvaluationMetrics) -> None:
+                if event == "start":
+                    print(f"{prefix}: training...", flush=True)
+                elif metrics is not None:
                     print(
                         (
-                            f"[Generation {generation:03d}] Individual {individual_index + 1:02d}/"
-                            f"{total_individuals:02d} - Dataset '{dataset.name}' complete: "
-                            f"acc={metrics.accuracy:.4f}, recall={metrics.recall:.4f}, "
-                            f"precision={metrics.precision:.4f}, f1={metrics.f1:.4f}"
+                            f"{prefix} complete: acc={metrics.accuracy:.4f}, "
+                            f"recall={metrics.recall:.4f}, precision={metrics.precision:.4f}, "
+                            f"f1={metrics.f1:.4f}"
                         ),
                         flush=True,
                     )
 
-                aggregated = evaluate_single_split(
-                    config=config,
-                    inputs=dataset.train.samples,
-                    labels=dataset.train.labels,
-                    test_inputs=dataset.test.samples,
-                    test_labels=dataset.test.labels,
-                    num_classes=dataset.num_classes,
-                    device=self.device,
-                    progress_callback=single_callback,
-                )
+            fold_metrics = evaluate_with_kfold(
+                config=config,
+                inputs=dataset.train.samples,
+                labels=dataset.train.labels,
+                test_inputs=dataset.test.samples,
+                test_labels=dataset.test.labels,
+                num_classes=dataset.num_classes,
+                device=self.device,
+                folds=5,
+                progress_callback=progress_callback,
+            )
+            aggregated = EvaluationMetrics.average(fold_metrics)
 
             metrics_by_dataset[dataset.name] = aggregated
+            fold_metrics_by_dataset[dataset.name] = fold_metrics
 
-        if self.logger and log_results:
-            self.logger.log_overall(
-                generation=generation,
-                individual_index=individual_index,
-                genome=genome,
-                metrics_by_dataset=metrics_by_dataset,
-            )
-
-        return metrics_by_dataset
+        return metrics_by_dataset, fold_metrics_by_dataset
 
 
 def _non_dominated_sort(population: Sequence[Individual]) -> List[List[Individual]]:
@@ -557,7 +521,7 @@ def _compute_crowding_distance(front: Sequence[Individual]) -> None:
             front_sorted[i].crowding_distance += distance
 
 
-def _select_tournament(population: Sequence[Individual], tournament_size: int = 2) -> Individual:
+def _select_tournament(population: Sequence[Individual], tournament_size: int = 3) -> Individual:
     """Performs tournament selection based on rank and crowding distance."""
 
     tournament_size = max(1, min(tournament_size, len(population)))
@@ -572,17 +536,22 @@ class NSGA2:
     def __init__(
         self,
         datasets: Sequence[DatasetInfo],
-        population_size: int = 30,
-        num_generations: int = 30,
+        population_size: int = 50,
+        num_generations: int = 100,
         seed: int = 42,
         output_dir: str = "results",
     ) -> None:
         self.datasets = datasets
-        self.population_size = population_size
-        self.num_generations = min(num_generations, 30)
-        if num_generations > 30:
+        if population_size != 50:
             print(
-                f"Requested {num_generations} generations but limiting to 30 per specification.",
+                f"Requested population size {population_size} but using 50 per specification.",
+                flush=True,
+            )
+        self.population_size = 50
+        self.num_generations = min(num_generations, 100)
+        if num_generations > 100:
+            print(
+                f"Requested {num_generations} generations but limiting to 100 per specification.",
                 flush=True,
             )
         self.random = random.Random(seed)
@@ -592,7 +561,7 @@ class NSGA2:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.logger = EvaluationLogger(output_dir, datasets)
-        self.evaluator = Evaluator(datasets, self.device, self.logger)
+        self.evaluator = Evaluator(datasets, self.device)
 
     def _initial_population(self) -> List[Individual]:
         return [Individual(genome=Genome.random()) for _ in range(self.population_size)]
@@ -601,49 +570,38 @@ class NSGA2:
         self,
         population: Iterable[Individual],
         generation: int,
-        use_kfold: bool,
-        evaluation_stage: str = "regular",
-        log_results: bool = True,
-        force: bool = False,
     ) -> None:
         if not isinstance(population, list):
             population = list(population)
         total_individuals = len(population)
         for index, individual in enumerate(population):
-            if force:
-                individual.fitness = None
             if individual.fitness is None:
-                metrics_by_dataset = self.evaluator.evaluate(
+                metrics_by_dataset, fold_metrics_by_dataset = self.evaluator.evaluate(
                     genome=individual.genome,
                     generation=generation,
                     individual_index=index,
                     total_individuals=total_individuals,
-                    use_kfold=use_kfold,
-                    evaluation_stage=evaluation_stage,
-                    log_results=log_results,
                 )
                 fitness = tuple(
                     metrics_by_dataset[dataset.name].accuracy for dataset in self.datasets
                 )
                 individual.fitness = fitness  # type: ignore[assignment]
+                individual.metrics_by_dataset = metrics_by_dataset
+                individual.fold_metrics_by_dataset = fold_metrics_by_dataset
 
     def run(self) -> List[Individual]:
         """Executes the NSGA-II loop and returns the final population."""
 
         population = self._initial_population()
-        self._evaluate_population(
-            population,
-            generation=0,
-            use_kfold=True,
-            evaluation_stage="initial",
-        )
+        self._evaluate_population(population, generation=0)
+
+        initial_fronts = _non_dominated_sort(population)
+        for front in initial_fronts:
+            _compute_crowding_distance(front)
+        if self.logger:
+            self.logger.log_generation(0, population)
 
         for generation in range(1, self.num_generations + 1):
-            is_final_generation = generation == self.num_generations
-            fronts = _non_dominated_sort(population)
-            for front in fronts:
-                _compute_crowding_distance(front)
-
             offspring: List[Individual] = []
             while len(offspring) < self.population_size:
                 parent1 = _select_tournament(population, tournament_size=3)
@@ -651,13 +609,7 @@ class NSGA2:
                 child_genome = parent1.genome.crossover(parent2.genome).mutate(mutation_rate=0.1)
                 offspring.append(Individual(genome=child_genome))
 
-            self._evaluate_population(
-                offspring,
-                generation=generation,
-                use_kfold=False,
-                evaluation_stage="evolution",
-                log_results=not is_final_generation,
-            )
+            self._evaluate_population(offspring, generation=generation)
 
             combined = population + offspring
             fronts = _non_dominated_sort(combined)
@@ -674,20 +626,10 @@ class NSGA2:
 
             population = new_population
 
-        print(
-            (
-                f"Re-evaluating final generation ({self.num_generations}) with 5-fold cross-validation "
-                "for definitive fitness scores..."
-            ),
-            flush=True,
-        )
-        self._evaluate_population(
-            population,
-            generation=self.num_generations,
-            use_kfold=True,
-            evaluation_stage="final",
-            log_results=True,
-            force=True,
-        )
+            updated_fronts = _non_dominated_sort(population)
+            for front in updated_fronts:
+                _compute_crowding_distance(front)
+            if self.logger:
+                self.logger.log_generation(generation, population)
 
         return population

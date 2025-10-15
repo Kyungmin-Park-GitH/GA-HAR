@@ -33,14 +33,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--generations",
         type=int,
-        default=10,
-        help="Number of generations to run the GA for.",
+        default=100,
+        help="Number of generations to run the GA for (capped at 100).",
     )
     parser.add_argument(
         "--population-size",
         type=int,
-        default=30,
-        help="Number of individuals per generation.",
+        default=50,
+        help="Number of individuals per generation (forced to 50).",
     )
     parser.add_argument(
         "--seed",

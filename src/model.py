@@ -37,14 +37,13 @@ class HARConvNet(nn.Module):
 
         layers = []
         in_channels = 40  # Each sample contains 40 frames stacked as channels.
-        padding = kernel_size // 2
         for _ in range(conv_layers):
             layers.append(
                 nn.Conv2d(
                     in_channels=in_channels,
                     out_channels=filters,
                     kernel_size=kernel_size,
-                    padding=padding,
+                    padding="same",
                     bias=True,
                 )
             )

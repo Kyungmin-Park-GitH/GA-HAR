@@ -68,13 +68,60 @@ def _load_single_csv(path: str) -> Tuple[np.ndarray, int]:
     # (frame_count, height, width).
     sample = values.reshape(frame_count, spatial_size, spatial_size)
 
+    sample = _apply_gaussian_smoothing(sample)
+
     label_value = frame.iloc[0, values_per_frame]
     try:
         label = int(label_value)
     except ValueError as exc:  # pragma: no cover - defensive programming
         raise ValueError(f"Label value '{label_value}' in {path} is not an integer") from exc
 
+    if not 0 <= label <= 10:
+        raise ValueError(
+            f"Label value {label} in {path} is outside the expected 0-10 range."
+        )
+
     return sample, label
+
+
+def _gaussian_kernel(size: int = 3, sigma: float = 1.0) -> np.ndarray:
+    """Creates a 2D Gaussian kernel."""
+
+    if size % 2 == 0:
+        raise ValueError("Gaussian kernel size must be odd to have a central element.")
+
+    radius = size // 2
+    ax = np.arange(-radius, radius + 1, dtype=np.float32)
+    xx, yy = np.meshgrid(ax, ax)
+    kernel = np.exp(-(xx**2 + yy**2) / (2.0 * sigma**2))
+    kernel_sum = float(kernel.sum())
+    if kernel_sum == 0.0:
+        raise ValueError("Gaussian kernel sum is zero, sigma may be too small.")
+    kernel /= kernel_sum
+    return kernel.astype(np.float32)
+
+
+_GAUSSIAN_KERNEL = _gaussian_kernel()
+
+
+def _apply_gaussian_smoothing(sample: np.ndarray) -> np.ndarray:
+    """Applies Gaussian smoothing to each frame of the sample."""
+
+    kernel = _GAUSSIAN_KERNEL
+    kernel_size = kernel.shape[0]
+    pad = kernel_size // 2
+
+    padded = np.pad(sample, ((0, 0), (pad, pad), (pad, pad)), mode="reflect")
+    smoothed = np.empty_like(sample, dtype=np.float32)
+
+    for frame_idx in range(sample.shape[0]):
+        frame = padded[frame_idx]
+        for row in range(sample.shape[1]):
+            for col in range(sample.shape[2]):
+                window = frame[row : row + kernel_size, col : col + kernel_size]
+                smoothed[frame_idx, row, col] = float(np.sum(window * kernel))
+
+    return smoothed
 
 
 def load_dataset(dataset_path: str, test_index_path: str, name: str) -> DatasetInfo:
@@ -123,17 +170,22 @@ def load_dataset(dataset_path: str, test_index_path: str, name: str) -> DatasetI
             "Test split is empty. Ensure the test index file lists at least one sample."
         )
 
-    all_labels = sorted({*train_labels, *test_labels})
-    label_mapping = {label: idx for idx, label in enumerate(all_labels)}
+    train_samples_array = np.stack(train_samples, axis=0).astype(np.float32)
+    train_labels_array = np.array(train_labels, dtype=np.int64)
+    test_samples_array = np.stack(test_samples, axis=0).astype(np.float32)
+    test_labels_array = np.array(test_labels, dtype=np.int64)
 
-    def convert(split_samples: List[np.ndarray], split_labels: List[int]) -> DatasetSplit:
-        samples_array = np.stack(split_samples, axis=0)
-        labels_array = np.array([label_mapping[label] for label in split_labels], dtype=np.int64)
-        return DatasetSplit(samples=samples_array, labels=labels_array)
+    mean = float(train_samples_array.mean())
+    std = float(train_samples_array.std())
+    if std < 1e-6:
+        std = 1.0
+
+    train_samples_array = (train_samples_array - mean) / std
+    test_samples_array = (test_samples_array - mean) / std
 
     return DatasetInfo(
         name=name,
-        train=convert(train_samples, train_labels),
-        test=convert(test_samples, test_labels),
-        num_classes=len(all_labels),
+        train=DatasetSplit(samples=train_samples_array, labels=train_labels_array),
+        test=DatasetSplit(samples=test_samples_array, labels=test_labels_array),
+        num_classes=11,
     )
