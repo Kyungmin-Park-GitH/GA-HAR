@@ -1,4 +1,4 @@
-"""Multi-objective genetic algorithm (NSGA-II) for LSTM-based HAR model search."""
+"""Multi-objective genetic algorithm (NSGA-II) for hybrid CNN-LSTM HAR model search."""
 from __future__ import annotations
 
 import csv
@@ -155,6 +155,9 @@ HYPERPARAMETER_SPACE: Dict[str, Sequence] = {
         0.98,
     ],
     "activation": ["relu", "tanh", "elu", "selu", "swish"],
+    "conv_layers": [1, 2, 3],
+    "filters": [4, 8, 12, 16, 24, 32, 48, 64, 96],
+    "kernel_size": [1, 2, 3, 4, 5],
 }
 
 
@@ -162,6 +165,7 @@ def _slugify(value: str) -> str:
     """Converts arbitrary dataset names to filesystem-friendly slugs."""
 
     return "".join(char.lower() if char.isalnum() else "_" for char in value).strip("_") or "dataset"
+
 
 def _random_value(key: str) -> object:
     """Samples a random value for the provided hyperparameter."""
@@ -179,6 +183,9 @@ class Genome:
     units: int
     dropout_rate: float
     activation: str
+    conv_layers: int
+    filters: int
+    kernel_size: int
 
     def crossover(self, other: "Genome") -> "Genome":
         """Performs uniform crossover between two parents with 50% mixing."""
@@ -408,6 +415,9 @@ class Evaluator:
             units=genome.units,
             dropout_rate=genome.dropout_rate,
             activation=genome.activation,
+            conv_layers=genome.conv_layers,
+            filters=genome.filters,
+            kernel_size=genome.kernel_size,
         )
 
         metrics_by_dataset: Dict[str, EvaluationMetrics] = {}
@@ -441,70 +451,97 @@ class Evaluator:
                 folds=5,
                 progress_callback=progress_callback,
             )
-            aggregated = EvaluationMetrics.average(fold_metrics)
-
-            metrics_by_dataset[dataset.name] = aggregated
+            metrics_by_dataset[dataset.name] = EvaluationMetrics.average(fold_metrics)
             fold_metrics_by_dataset[dataset.name] = fold_metrics
 
         return metrics_by_dataset, fold_metrics_by_dataset
 
 
+def _dominates(individual_a: Individual, individual_b: Individual) -> bool:
+    """Checks whether ``individual_a`` dominates ``individual_b``."""
+
+    assert individual_a.fitness is not None
+    assert individual_b.fitness is not None
+
+    better_or_equal_all = True
+    strictly_better = False
+    for value_a, value_b in zip(individual_a.fitness, individual_b.fitness):
+        if value_a < value_b:
+            better_or_equal_all = False
+            break
+        if value_a > value_b:
+            strictly_better = True
+    return better_or_equal_all and strictly_better
+
+
 def _non_dominated_sort(population: Sequence[Individual]) -> List[List[Individual]]:
-    """Performs non-dominated sorting and returns fronts."""
+    """Computes the non-dominated sorting fronts."""
 
     fronts: List[List[Individual]] = []
-    domination_counts: Dict[int, int] = {i: 0 for i in range(len(population))}
-    dominated: Dict[int, List[int]] = {i: [] for i in range(len(population))}
+    domination_counts: Dict[int, int] = {index: 0 for index in range(len(population))}
+    dominated: Dict[int, List[int]] = {index: [] for index in range(len(population))}
 
-    for i, individual in enumerate(population):
-        for j, other in enumerate(population):
+    first_front: List[Individual] = []
+    for i, individual_i in enumerate(population):
+        individual_i.rank = math.inf
+        individual_i.crowding_distance = 0.0
+        domination_counts[i] = 0
+        dominated[i] = []
+        if individual_i.fitness is None:
+            raise ValueError("All individuals must have fitness computed before sorting")
+
+        for j, individual_j in enumerate(population):
             if i == j:
                 continue
-            if dominates(individual, other):
+            if individual_j.fitness is None:
+                raise ValueError("All individuals must have fitness computed before sorting")
+
+            if _dominates(individual_i, individual_j):
                 dominated[i].append(j)
-            elif dominates(other, individual):
+            elif _dominates(individual_j, individual_i):
                 domination_counts[i] += 1
 
-    current_front = [i for i, count in domination_counts.items() if count == 0]
-    front_index = 0
+        if domination_counts[i] == 0:
+            individual_i.rank = 0
+            first_front.append(individual_i)
+
+    fronts.append(first_front)
+
+    current_front = first_front
+    front_rank = 0
     while current_front:
-        for idx in current_front:
-            population[idx].rank = front_index
-        fronts.append([population[idx] for idx in current_front])
-        next_front: List[int] = []
-        for idx in current_front:
-            for dominated_index in dominated[idx]:
+        next_front: List[Individual] = []
+        for individual in current_front:
+            index = population.index(individual)
+            for dominated_index in dominated[index]:
                 domination_counts[dominated_index] -= 1
                 if domination_counts[dominated_index] == 0:
-                    next_front.append(dominated_index)
-        front_index += 1
+                    dominated_individual = population[dominated_index]
+                    dominated_individual.rank = front_rank + 1
+                    next_front.append(dominated_individual)
+        front_rank += 1
         current_front = next_front
+        if current_front:
+            fronts.append(current_front)
+
     return fronts
 
 
-def dominates(individual_a: Individual, individual_b: Individual) -> bool:
-    """Checks whether ``individual_a`` Pareto-dominates ``individual_b``."""
-
-    if individual_a.fitness is None or individual_b.fitness is None:
-        raise ValueError("Individuals must be evaluated before dominance comparison.")
-
-    better_or_equal = all(a >= b for a, b in zip(individual_a.fitness, individual_b.fitness))
-    strictly_better = any(a > b for a, b in zip(individual_a.fitness, individual_b.fitness))
-    return better_or_equal and strictly_better
-
-
 def _compute_crowding_distance(front: Sequence[Individual]) -> None:
-    """Computes crowding distance for a front in-place."""
+    """Computes crowding distance for individuals in a front."""
 
     if not front:
         return
 
-    num_objectives = len(front[0].fitness or [])
+    num_objectives = len(front[0].fitness) if front[0].fitness is not None else 0
     for individual in front:
         individual.crowding_distance = 0.0
 
     for objective in range(num_objectives):
-        front_sorted = sorted(front, key=lambda ind: ind.fitness[objective] if ind.fitness else 0.0)
+        front_sorted = sorted(
+            front,
+            key=lambda ind: ind.fitness[objective] if ind.fitness is not None else -float("inf"),
+        )
         front_sorted[0].crowding_distance = float("inf")
         front_sorted[-1].crowding_distance = float("inf")
         min_value = front_sorted[0].fitness[objective]

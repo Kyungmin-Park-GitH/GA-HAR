@@ -1,4 +1,4 @@
-"""Training utilities tailored to the LSTM HAR model."""
+"""Training utilities tailored to the hybrid CNN-LSTM HAR model."""
 from __future__ import annotations
 
 import copy
@@ -12,7 +12,7 @@ from sklearn.model_selection import KFold
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
-from .model import HARLSTMNet
+from .model import HARHybridNet
 
 
 @dataclass
@@ -25,6 +25,9 @@ class TrainingConfig:
     units: int
     dropout_rate: float
     activation: str
+    conv_layers: int
+    filters: int
+    kernel_size: int
     max_epochs: int = 1000
     patience: int = 5
 
@@ -146,9 +149,12 @@ def train_with_validation(
     val_labels: np.ndarray,
     num_classes: int,
     device: torch.device,
-) -> HARLSTMNet:
-    model = HARLSTMNet(
+) -> HARHybridNet:
+    model = HARHybridNet(
         num_classes=num_classes,
+        conv_layers=config.conv_layers,
+        filters=config.filters,
+        kernel_size=config.kernel_size,
         lstm_layers=config.lstm_layers,
         units=config.units,
         dropout_rate=config.dropout_rate,
