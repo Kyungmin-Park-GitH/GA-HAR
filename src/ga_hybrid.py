@@ -161,6 +161,17 @@ HYPERPARAMETER_SPACE: Dict[str, Sequence] = {
 }
 
 
+def _compute_objectives(accuracies: Sequence[float]) -> Tuple[float, float]:
+    """Returns the mean and minimum accuracy objectives for NSGA-II."""
+
+    if not accuracies:
+        return 0.0, 0.0
+
+    mean_accuracy = float(sum(accuracies) / len(accuracies))
+    min_accuracy = float(min(accuracies))
+    return mean_accuracy, min_accuracy
+
+
 def _slugify(value: str) -> str:
     """Converts arbitrary dataset names to filesystem-friendly slugs."""
 
@@ -327,6 +338,10 @@ class EvaluationLogger:
                         f"{slug}_f1_score",
                     ]
                 )
+            header.extend([
+                "mean_accuracy_objective",
+                "min_accuracy_objective",
+            ])
             self._write_header(self.overall_file, header)
 
         for rank_index, individual in enumerate(sorted_individuals, start=1):
@@ -373,10 +388,12 @@ class EvaluationLogger:
 
             overall_row: List[object] = [generation, rank_index]
             overall_row.extend(getattr(individual.genome, field) for field in self.hyperparameter_fields)
+            accuracies: List[float] = []
             for dataset in self.datasets:
                 metrics = individual.metrics_by_dataset.get(dataset.name)
                 if metrics is None:
                     continue
+                accuracies.append(metrics.accuracy)
                 overall_row.extend(
                     [
                         f"{metrics.accuracy:.6f}",
@@ -385,6 +402,13 @@ class EvaluationLogger:
                         f"{metrics.f1:.6f}",
                     ]
                 )
+            mean_accuracy, min_accuracy = _compute_objectives(accuracies)
+            overall_row.extend(
+                [
+                    f"{mean_accuracy:.6f}",
+                    f"{min_accuracy:.6f}",
+                ]
+            )
             self._append_row(self.overall_file, overall_row)
 
 
@@ -616,10 +640,11 @@ class NSGA2:
                     individual_index=index,
                     total_individuals=total_individuals,
                 )
-                fitness = tuple(
+                accuracies = [
                     metrics_by_dataset[dataset.name].accuracy for dataset in self.datasets
-                )
-                individual.fitness = fitness  # type: ignore[assignment]
+                ]
+                mean_accuracy, min_accuracy = _compute_objectives(accuracies)
+                individual.fitness = (mean_accuracy, min_accuracy)
                 individual.metrics_by_dataset = metrics_by_dataset
                 individual.fold_metrics_by_dataset = fold_metrics_by_dataset
 
