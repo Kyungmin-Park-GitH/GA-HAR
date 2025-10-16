@@ -1,19 +1,8 @@
 """Neural network definition for the infrared HAR task."""
 from __future__ import annotations
 
-from typing import Callable, Dict
-
 import torch
 from torch import nn
-
-
-_ACTIVATIONS: Dict[str, Callable[[], nn.Module]] = {
-    "relu": nn.ReLU,
-    "tanh": nn.Tanh,
-    "elu": nn.ELU,
-    "selu": nn.SELU,
-    "swish": lambda: nn.SiLU(inplace=False),
-}
 
 
 class HARConvNet(nn.Module):
@@ -26,14 +15,8 @@ class HARConvNet(nn.Module):
         filters: int,
         kernel_size: int,
         dropout_rate: float,
-        activation: str,
     ) -> None:
         super().__init__()
-
-        if activation not in _ACTIVATIONS:
-            raise ValueError(f"Unsupported activation '{activation}'.")
-
-        activation_factory = _ACTIVATIONS[activation]
 
         layers = []
         in_channels = 40  # Each sample contains 40 frames stacked as channels.
@@ -47,7 +30,7 @@ class HARConvNet(nn.Module):
                     bias=True,
                 )
             )
-            layers.append(activation_factory())
+            layers.append(nn.ReLU())
             in_channels = filters
 
         self.conv = nn.Sequential(*layers)

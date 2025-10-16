@@ -24,7 +24,6 @@ class TrainingConfig:
     lstm_layers: int
     units: int
     dropout_rate: float
-    activation: str
     max_epochs: int = 1000
     patience: int = 5
 
@@ -152,7 +151,6 @@ def train_with_validation(
         lstm_layers=config.lstm_layers,
         units=config.units,
         dropout_rate=config.dropout_rate,
-        activation=config.activation,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)

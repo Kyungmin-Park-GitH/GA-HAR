@@ -25,7 +25,6 @@ class TrainingConfig:
     filters: int
     kernel_size: int
     dropout_rate: float
-    activation: str
     max_epochs: int = 1000
     patience: int = 5
 
@@ -164,7 +163,6 @@ def train_with_validation(
         filters=config.filters,
         kernel_size=config.kernel_size,
         dropout_rate=config.dropout_rate,
-        activation=config.activation,
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
