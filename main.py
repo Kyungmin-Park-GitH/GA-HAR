@@ -9,10 +9,12 @@ from src.data_utils import load_dataset
 try:
     from src.ga import NSGA2
 except ModuleNotFoundError as exc:  # pragma: no cover - only triggered on misconfiguration
-    raise ModuleNotFoundError(
-        "`src.ga` 모듈을 찾을 수 없습니다. 사용하려는 아키텍처의 GA 파일을 "
-        "`src/ga.py`로 이름을 바꾼 후 다시 실행해 주세요. 예: `ga_lstm.py` → `ga.py`."
-    ) from exc
+    if getattr(exc, "name", None) == "src.ga":
+        raise ModuleNotFoundError(
+            "`src.ga` 모듈을 찾을 수 없습니다. 사용하려는 아키텍처의 GA 파일을 "
+            "`src/ga.py`로 이름을 바꾼 후 다시 실행해 주세요. 예: `ga_lstm.py` → `ga.py`."
+        ) from exc
+    raise
 
 
 def parse_args() -> argparse.Namespace:
