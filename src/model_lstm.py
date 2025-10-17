@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -22,27 +23,34 @@ class HARLSTMNet(nn.Module):
 
         self.sequence_length = 40
         self.feature_size = 8 * 8
-        self.units = units
+        self.dropout_rate = dropout_rate
 
-        # ``batch_first`` allows receiving inputs shaped ``(batch, time, features)``.
-        self.lstm = nn.LSTM(
-            input_size=self.feature_size,
-            hidden_size=units,
-            num_layers=lstm_layers,
-            dropout=dropout_rate if lstm_layers > 1 else 0.0,
-            batch_first=True,
-        )
+        self.lstm_layers = nn.ModuleList()
 
-        self.dropout = nn.Dropout(p=dropout_rate) if dropout_rate > 0 else nn.Identity()
+        for layer_index in range(lstm_layers):
+            input_size = self.feature_size if layer_index == 0 else units
+            self.lstm_layers.append(
+                nn.LSTM(
+                    input_size=input_size,
+                    hidden_size=units,
+                    num_layers=1,
+                    batch_first=True,
+                )
+            )
+
         self.classifier = nn.Linear(units, num_classes)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Runs a forward pass."""
+        """Runs a forward pass that mirrors the provided Keras design."""
 
         batch_size = inputs.size(0)
-        flattened = inputs.view(batch_size, self.sequence_length, self.feature_size)
-        _, (hidden, _) = self.lstm(flattened)
-        final_state = hidden[-1]
-        activated = torch.tanh(final_state)
-        logits = self.classifier(self.dropout(activated))
+        sequences = inputs.view(batch_size, self.sequence_length, self.feature_size)
+
+        for lstm in self.lstm_layers:
+            if self.dropout_rate > 0.0:
+                sequences = F.dropout(sequences, p=self.dropout_rate, training=self.training)
+            sequences, (hidden, _) = lstm(sequences)
+
+        final_output = sequences[:, -1, :]
+        logits = self.classifier(final_output)
         return logits

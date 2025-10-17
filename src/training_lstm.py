@@ -15,6 +15,20 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 from .model import HARLSTMNet
 
 
+def _reshape_for_lstm(inputs: np.ndarray) -> np.ndarray:
+    """Reshapes samples to ``(batch, time, features)`` for the LSTM."""
+
+    if inputs.ndim == 4:
+        batch_size, time_steps, height, width = inputs.shape
+        return inputs.reshape(batch_size, time_steps, height * width)
+    if inputs.ndim == 3:
+        return inputs
+    raise ValueError(
+        "Expected inputs with 3 or 4 dimensions for LSTM training, "
+        f"received shape {inputs.shape}."
+    )
+
+
 @dataclass
 class TrainingConfig:
     """Configuration parameters shared across training runs."""
@@ -63,7 +77,8 @@ def _create_dataloader(
     batch_size: int,
     shuffle: bool,
 ) -> DataLoader:
-    tensor_x = torch.from_numpy(inputs)
+    sequences = _reshape_for_lstm(inputs)
+    tensor_x = torch.from_numpy(np.ascontiguousarray(sequences, dtype=np.float32))
     tensor_y = torch.from_numpy(labels)
     dataset: Dataset[Tuple[torch.Tensor, torch.Tensor]] = TensorDataset(tensor_x, tensor_y)
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
