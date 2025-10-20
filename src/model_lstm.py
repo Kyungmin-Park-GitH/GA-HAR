@@ -2,8 +2,28 @@
 from __future__ import annotations
 
 import torch
-import torch.nn.functional as F
 from torch import nn
+
+
+class _LSTMBlock(nn.Module):
+    """Replicates a single Keras ``LSTM`` layer with input dropout."""
+
+    def __init__(self, input_size: int, units: int, dropout_rate: float) -> None:
+        super().__init__()
+
+        self.input_dropout = (
+            nn.Dropout(p=dropout_rate) if dropout_rate > 0.0 else nn.Identity()
+        )
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=units,
+            batch_first=True,
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        dropped = self.input_dropout(inputs)
+        outputs, _ = self.lstm(dropped)
+        return outputs
 
 
 class HARLSTMNet(nn.Module):
@@ -23,18 +43,15 @@ class HARLSTMNet(nn.Module):
 
         self.sequence_length = 40
         self.feature_size = 8 * 8
-        self.dropout_rate = dropout_rate
 
-        self.lstm_layers = nn.ModuleList()
-
+        self.lstm_blocks = nn.ModuleList()
         for layer_index in range(lstm_layers):
             input_size = self.feature_size if layer_index == 0 else units
-            self.lstm_layers.append(
-                nn.LSTM(
+            self.lstm_blocks.append(
+                _LSTMBlock(
                     input_size=input_size,
-                    hidden_size=units,
-                    num_layers=1,
-                    batch_first=True,
+                    units=units,
+                    dropout_rate=dropout_rate,
                 )
             )
 
@@ -46,10 +63,8 @@ class HARLSTMNet(nn.Module):
         batch_size = inputs.size(0)
         sequences = inputs.view(batch_size, self.sequence_length, self.feature_size)
 
-        for lstm in self.lstm_layers:
-            if self.dropout_rate > 0.0:
-                sequences = F.dropout(sequences, p=self.dropout_rate, training=self.training)
-            sequences, (hidden, _) = lstm(sequences)
+        for block in self.lstm_blocks:
+            sequences = block(sequences)
 
         final_output = sequences[:, -1, :]
         logits = self.classifier(final_output)
