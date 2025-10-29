@@ -85,7 +85,7 @@ def _create_dataloader(
 
 
 def _evaluate(model: nn.Module, data_loader: DataLoader, device: torch.device) -> Tuple[float, float]:
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.NLLLoss()
     total_loss = 0.0
     total_correct = 0
     total_samples = 0
@@ -96,7 +96,8 @@ def _evaluate(model: nn.Module, data_loader: DataLoader, device: torch.device) -
             inputs = inputs.to(device=device, dtype=torch.float32)
             labels = labels.to(device=device)
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            log_probs = torch.log(torch.clamp(outputs, min=1e-8))
+            loss = criterion(log_probs, labels)
             predictions = outputs.argmax(dim=1)
 
             total_loss += loss.item() * labels.size(0)
@@ -169,7 +170,7 @@ def train_with_validation(
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.NLLLoss()
 
     train_loader = _create_dataloader(train_inputs, train_labels, config.batch_size, shuffle=True)
     val_loader = _create_dataloader(val_inputs, val_labels, config.batch_size, shuffle=False)
@@ -186,7 +187,8 @@ def train_with_validation(
 
             optimizer.zero_grad()
             outputs = model(inputs)
-            loss = criterion(outputs, labels)
+            log_probs = torch.log(torch.clamp(outputs, min=1e-8))
+            loss = criterion(log_probs, labels)
             loss.backward()
             optimizer.step()
 

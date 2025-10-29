@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 class _SequentialLSTMLayer(nn.Module):
@@ -18,14 +19,16 @@ class _SequentialLSTMLayer(nn.Module):
         super().__init__()
 
         self.return_sequences = return_sequences
+        self.dropout_rate = dropout_rate
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=units,
             batch_first=True,
-            dropout=dropout_rate,
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if self.dropout_rate > 0.0:
+            inputs = F.dropout(inputs, p=self.dropout_rate, training=self.training)
         outputs, _ = self.lstm(inputs)
         if self.return_sequences:
             return outputs
@@ -65,7 +68,10 @@ class HARLSTMNet(nn.Module):
             input_size = units
 
         self.lstm_stack = nn.Sequential(*layers)
-        self.classifier = nn.Linear(units, num_classes)
+        self.classifier = nn.Sequential(
+            nn.Linear(units, num_classes),
+            nn.Softmax(dim=1),
+        )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Runs a forward pass that mirrors the provided Keras design."""
@@ -77,5 +83,5 @@ class HARLSTMNet(nn.Module):
         if final_output.dim() == 3:
             final_output = final_output[:, -1, :]
 
-        logits = self.classifier(final_output)
-        return logits
+        probabilities = self.classifier(final_output)
+        return probabilities
