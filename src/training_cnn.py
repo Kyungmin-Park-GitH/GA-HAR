@@ -8,7 +8,7 @@ from typing import Callable, Sequence, Tuple
 import numpy as np
 import torch
 from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
-from sklearn.model_selection import KFold, train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from torch import nn
 from torch.utils.data import DataLoader, Dataset, TensorDataset
 
@@ -201,32 +201,37 @@ def train_with_validation(
     return best_model
 
 
-FoldProgressCallback = Callable[[str, int, EvaluationMetrics | None], None]
+FoldProgressCallback = Callable[[str, int, str | None, EvaluationMetrics | None], None]
 
 
 def evaluate_with_kfold(
     config: TrainingConfig,
     inputs: np.ndarray,
     labels: np.ndarray,
-    test_inputs: np.ndarray,
-    test_labels: np.ndarray,
+    test_sets: dict[str, Tuple[np.ndarray, np.ndarray]],
     num_classes: int,
     device: torch.device,
     folds: int = 5,
     progress_callback: FoldProgressCallback | None = None,
-) -> Tuple[EvaluationMetrics, ...]:
-    """Evaluates the genome using K-fold cross validation.
+) -> dict[str, Tuple[EvaluationMetrics, ...]]:
+    """Evaluates the genome using stratified K-fold cross validation.
 
-    Returns the list of test metrics, one per fold.
+    Returns a mapping from dataset name to the list of test metrics (one per fold).
     """
 
-    kfold = KFold(n_splits=folds, shuffle=True, random_state=42)
-    test_loader = _create_dataloader(test_inputs, test_labels, config.batch_size, shuffle=False)
+    stratified_kfold = StratifiedKFold(n_splits=folds, shuffle=True, random_state=23)
+    fold_metrics_by_dataset: dict[str, list[EvaluationMetrics]] = {
+        name: [] for name in test_sets
+    }
 
-    fold_metrics: list[EvaluationMetrics] = []
-    for fold_index, (train_indices, val_indices) in enumerate(kfold.split(inputs)):
+    test_loaders = {
+        name: _create_dataloader(test_inputs, test_labels, config.batch_size, shuffle=False)
+        for name, (test_inputs, test_labels) in test_sets.items()
+    }
+
+    for fold_index, (train_indices, val_indices) in enumerate(stratified_kfold.split(inputs, labels)):
         if progress_callback is not None:
-            progress_callback("start", fold_index, None)
+            progress_callback("start", fold_index, None, None)
 
         train_model = train_with_validation(
             config=config,
@@ -238,13 +243,15 @@ def evaluate_with_kfold(
             device=device,
         )
 
-        metrics = _compute_classification_metrics(train_model, test_loader, device, num_classes)
-        if progress_callback is not None:
-            progress_callback("end", fold_index, metrics)
+        for dataset_name, test_loader in test_loaders.items():
+            metrics = _compute_classification_metrics(
+                train_model, test_loader, device, num_classes
+            )
+            fold_metrics_by_dataset[dataset_name].append(metrics)
+            if progress_callback is not None:
+                progress_callback("end", fold_index, dataset_name, metrics)
 
-        fold_metrics.append(metrics)
-
-    return tuple(fold_metrics)
+    return {name: tuple(metrics) for name, metrics in fold_metrics_by_dataset.items()}
 
 
 def evaluate_single_split(

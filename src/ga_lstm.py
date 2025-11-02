@@ -24,15 +24,44 @@ HYPERPARAMETER_SPACE: Dict[str, Sequence] = {
 }
 
 
-def _compute_objectives(accuracies: Sequence[float]) -> Tuple[float, float]:
-    """Returns the mean and minimum accuracy objectives for NSGA-II."""
+def _compute_objectives(
+    fold_metrics_by_dataset: Dict[str, Tuple[EvaluationMetrics, ...]]
+) -> Tuple[float, float, float, float]:
+    """Computes the four NSGA-II objectives from per-fold metrics."""
 
-    if not accuracies:
-        return 0.0, 0.0
+    if not fold_metrics_by_dataset:
+        return 0.0, 0.0, 0.0, 0.0
 
-    mean_accuracy = float(sum(accuracies) / len(accuracies))
-    min_accuracy = float(min(accuracies))
-    return mean_accuracy, min_accuracy
+    metrics_sequences = list(fold_metrics_by_dataset.values())
+    fold_count = len(metrics_sequences[0]) if metrics_sequences else 0
+    if fold_count == 0:
+        return 0.0, 0.0, 0.0, 0.0
+
+    for metrics in metrics_sequences:
+        if len(metrics) != fold_count:
+            raise ValueError("All datasets must provide the same number of folds")
+
+    mean_accuracy_values: list[float] = []
+    min_accuracy_values: list[float] = []
+    mean_f1_values: list[float] = []
+    min_f1_values: list[float] = []
+
+    for fold_index in range(fold_count):
+        accuracies = [metrics[fold_index].accuracy for metrics in metrics_sequences]
+        f1_scores = [metrics[fold_index].f1 for metrics in metrics_sequences]
+
+        mean_accuracy_values.append(float(sum(accuracies) / len(accuracies)))
+        min_accuracy_values.append(float(min(accuracies)))
+        mean_f1_values.append(float(sum(f1_scores) / len(f1_scores)))
+        min_f1_values.append(float(min(f1_scores)))
+
+    fold_count_float = float(fold_count)
+    return (
+        sum(mean_accuracy_values) / fold_count_float,
+        sum(min_accuracy_values) / fold_count_float,
+        sum(mean_f1_values) / fold_count_float,
+        sum(min_f1_values) / fold_count_float,
+    )
 
 
 def _slugify(value: str) -> str:
@@ -93,7 +122,7 @@ class Individual:
     """Wraps a genome and stores evaluation results."""
 
     genome: Genome
-    fitness: Tuple[float, float] | None = None
+    fitness: Tuple[float, float, float, float] | None = None
     crowding_distance: float = 0.0
     rank: int = math.inf
     metrics_by_dataset: Dict[str, EvaluationMetrics] = field(default_factory=dict)
@@ -199,6 +228,8 @@ class EvaluationLogger:
             header.extend([
                 "mean_accuracy_objective",
                 "min_accuracy_objective",
+                "mean_f1_objective",
+                "min_f1_objective",
             ])
             self._write_header(self.overall_file, header)
 
@@ -246,12 +277,10 @@ class EvaluationLogger:
 
             overall_row: List[object] = [generation, rank_index]
             overall_row.extend(getattr(individual.genome, field) for field in self.hyperparameter_fields)
-            accuracies: List[float] = []
             for dataset in self.datasets:
                 metrics = individual.metrics_by_dataset.get(dataset.name)
                 if metrics is None:
                     continue
-                accuracies.append(metrics.accuracy)
                 overall_row.extend(
                     [
                         f"{metrics.accuracy:.6f}",
@@ -260,13 +289,8 @@ class EvaluationLogger:
                         f"{metrics.f1:.6f}",
                     ]
                 )
-            mean_accuracy, min_accuracy = _compute_objectives(accuracies)
-            overall_row.extend(
-                [
-                    f"{mean_accuracy:.6f}",
-                    f"{min_accuracy:.6f}",
-                ]
-            )
+            objectives = _compute_objectives(individual.fold_metrics_by_dataset)
+            overall_row.extend([f"{value:.6f}" for value in objectives])
             self._append_row(self.overall_file, overall_row)
 
 
@@ -298,41 +322,58 @@ class Evaluator:
             dropout_rate=genome.dropout_rate,
         )
 
-        metrics_by_dataset: Dict[str, EvaluationMetrics] = {}
-        fold_metrics_by_dataset: Dict[str, Tuple[EvaluationMetrics, ...]] = {}
-        for dataset in self.datasets:
-            def progress_callback(event: str, fold_index: int, metrics: EvaluationMetrics | None) -> None:
-                prefix = (
-                    f"[Generation {generation:03d}] Individual {individual_index + 1:02d}/"
-                    f"{total_individuals:02d} - Dataset '{dataset.name}' Fold {fold_index + 1}/5"
-                )
-                if event == "start":
-                    print(f"{prefix}: training...", flush=True)
-                elif metrics is not None:
-                    print(
-                        (
-                            f"{prefix} complete: acc={metrics.accuracy:.4f}, "
-                            f"recall={metrics.recall:.4f}, precision={metrics.precision:.4f}, "
-                            f"f1={metrics.f1:.4f}"
-                        ),
-                        flush=True,
-                    )
+        combined_train_inputs = np.concatenate(
+            [dataset.train.samples for dataset in self.datasets], axis=0
+        )
+        combined_train_labels = np.concatenate(
+            [dataset.train.labels for dataset in self.datasets], axis=0
+        )
+        test_sets = {
+            dataset.name: (dataset.test.samples, dataset.test.labels)
+            for dataset in self.datasets
+        }
 
-            fold_metrics = evaluate_with_kfold(
-                config=config,
-                inputs=dataset.train.samples,
-                labels=dataset.train.labels,
-                test_inputs=dataset.test.samples,
-                test_labels=dataset.test.labels,
-                num_classes=dataset.num_classes,
-                device=self.device,
-                folds=5,
-                progress_callback=progress_callback,
+        def progress_callback(
+            event: str,
+            fold_index: int,
+            dataset_name: str | None,
+            metrics: EvaluationMetrics | None,
+        ) -> None:
+            prefix = (
+                f"[Generation {generation:03d}] Individual {individual_index + 1:02d}/"
+                f"{total_individuals:02d} Fold {fold_index + 1}/5"
             )
-            aggregated = EvaluationMetrics.average(fold_metrics)
+            if event == "start":
+                print(f"{prefix}: training...", flush=True)
+            elif dataset_name is not None and metrics is not None:
+                print(
+                    (
+                        f"{prefix} test on '{dataset_name}': acc={metrics.accuracy:.4f}, "
+                        f"recall={metrics.recall:.4f}, precision={metrics.precision:.4f}, "
+                        f"f1={metrics.f1:.4f}"
+                    ),
+                    flush=True,
+                )
 
-            metrics_by_dataset[dataset.name] = aggregated
-            fold_metrics_by_dataset[dataset.name] = fold_metrics
+        num_classes = max(dataset.num_classes for dataset in self.datasets)
+
+        fold_metrics_by_dataset = evaluate_with_kfold(
+            config=config,
+            inputs=combined_train_inputs,
+            labels=combined_train_labels,
+            test_sets=test_sets,
+            num_classes=num_classes,
+            device=self.device,
+            folds=5,
+            progress_callback=progress_callback,
+        )
+
+        metrics_by_dataset: Dict[str, EvaluationMetrics] = {}
+        for dataset in self.datasets:
+            dataset_metrics = fold_metrics_by_dataset.get(dataset.name)
+            if not dataset_metrics:
+                continue
+            metrics_by_dataset[dataset.name] = EvaluationMetrics.average(dataset_metrics)
 
         return metrics_by_dataset, fold_metrics_by_dataset
 
@@ -467,11 +508,8 @@ class NSGA2:
                     individual_index=index,
                     total_individuals=total_individuals,
                 )
-                accuracies = [
-                    metrics_by_dataset[dataset.name].accuracy for dataset in self.datasets
-                ]
-                mean_accuracy, min_accuracy = _compute_objectives(accuracies)
-                individual.fitness = (mean_accuracy, min_accuracy)
+                objectives = _compute_objectives(fold_metrics_by_dataset)
+                individual.fitness = objectives
                 individual.metrics_by_dataset = metrics_by_dataset
                 individual.fold_metrics_by_dataset = fold_metrics_by_dataset
 

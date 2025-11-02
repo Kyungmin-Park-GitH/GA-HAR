@@ -91,12 +91,14 @@ def main() -> None:
     output_lines: List[str] = []
     output_lines.append("Final Pareto front (approximate):")
     for individual in final_population:
-        if individual.rank == 0:
+        if individual.rank == 0 and individual.fitness is not None:
             genome = individual.genome
-            acc_coventry, acc_infra = individual.fitness if individual.fitness else (0.0, 0.0)
+            mean_acc, min_acc, mean_f1, min_f1 = individual.fitness
             output_lines.append(
                 (
-                    f"Accuracy Coventry: {acc_coventry:.4f}, Accuracy Infra: {acc_infra:.4f}, "
+                    "Objectives -> "
+                    f"mean_acc: {mean_acc:.4f}, min_acc: {min_acc:.4f}, "
+                    f"mean_f1: {mean_f1:.4f}, min_f1: {min_f1:.4f}; "
                     f"Genome: {genome}"
                 )
             )
