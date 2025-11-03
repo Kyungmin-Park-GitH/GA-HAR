@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 
 class _SequentialLSTMLayer(nn.Module):
-    """Thin wrapper mimicking a single Keras ``LSTM`` layer."""
+    """Single LSTM layer with recurrent dropout support."""
 
     def __init__(
         self,
@@ -19,20 +18,56 @@ class _SequentialLSTMLayer(nn.Module):
         super().__init__()
 
         self.return_sequences = return_sequences
-        self.dropout_rate = dropout_rate
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=units,
-            batch_first=True,
-        )
+        self.dropout_rate = float(dropout_rate)
+        self.units = units
+        self.cell = nn.LSTMCell(input_size=input_size, hidden_size=units)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        if self.dropout_rate > 0.0:
-            inputs = F.dropout(inputs, p=self.dropout_rate, training=self.training)
-        outputs, _ = self.lstm(inputs)
+        """Runs the temporal loop while applying recurrent dropout."""
+
+        if inputs.dim() != 3:
+            raise ValueError(
+                "Expected inputs shaped as (batch, time, features); "
+                f"received {tuple(inputs.shape)}"
+            )
+
+        batch_size, time_steps, _ = inputs.shape
+        device = inputs.device
+        dtype = inputs.dtype
+
+        hidden_state = torch.zeros(batch_size, self.units, device=device, dtype=dtype)
+        cell_state = torch.zeros(batch_size, self.units, device=device, dtype=dtype)
+        outputs: list[torch.Tensor] = []
+        dropout_mask: torch.Tensor | None = None
+
+        for step in range(time_steps):
+            timestep_input = inputs[:, step, :]
+
+            if self.training and self.dropout_rate > 0.0:
+                if dropout_mask is None or dropout_mask.size(0) != batch_size:
+                    dropout_mask = torch.bernoulli(
+                        torch.full(
+                            (batch_size, self.units),
+                            1.0 - self.dropout_rate,
+                            device=device,
+                            dtype=dtype,
+                        )
+                    )
+                    dropout_mask.div_(max(1.0 - self.dropout_rate, torch.finfo(dtype).eps))
+                hidden_for_cell = hidden_state * dropout_mask
+            else:
+                hidden_for_cell = hidden_state
+
+            hidden_state, cell_state = self.cell(
+                timestep_input,
+                (hidden_for_cell, cell_state),
+            )
+            outputs.append(hidden_state.unsqueeze(1))
+
+        sequence_outputs = torch.cat(outputs, dim=1)
         if self.return_sequences:
-            return outputs
-        return outputs[:, -1, :]
+            return sequence_outputs
+        return sequence_outputs[:, -1, :]
 
 
 class HARLSTMNet(nn.Module):
