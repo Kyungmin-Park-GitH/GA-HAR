@@ -6,7 +6,7 @@ from torch import nn
 
 
 class _LSTMBlock(nn.Module):
-    """Single LSTM layer with input dropout and built-in unrolling."""
+    """Single LSTM layer with Keras-style input dropout."""
 
     def __init__(
         self,
@@ -18,11 +18,11 @@ class _LSTMBlock(nn.Module):
         super().__init__()
 
         self.return_sequences = return_sequences
-        self.input_dropout: nn.Module
-        if dropout_rate > 0.0:
-            self.input_dropout = nn.Dropout(p=dropout_rate)
-        else:
-            self.input_dropout = nn.Identity()
+        self.dropout_rate = float(dropout_rate)
+        if not 0.0 <= self.dropout_rate < 1.0:
+            raise ValueError("dropout_rate must be in [0.0, 1.0)")
+
+        self.input_size = input_size
 
         self.lstm = nn.LSTM(
             input_size=input_size,
@@ -41,7 +41,17 @@ class _LSTMBlock(nn.Module):
                 f"received {tuple(inputs.shape)}"
             )
 
-        dropped_inputs = self.input_dropout(inputs)
+        if self.training and self.dropout_rate > 0.0:
+            keep_prob = 1.0 - self.dropout_rate
+            if keep_prob <= 0.0:
+                raise ValueError("dropout_rate of 1.0 disables the entire layer")
+
+            mask = inputs.new_empty(inputs.size(0), 1, self.input_size)
+            mask.bernoulli_(keep_prob).div_(keep_prob)
+            dropped_inputs = inputs * mask
+        else:
+            dropped_inputs = inputs
+
         outputs, _ = self.lstm(dropped_inputs)
         if self.return_sequences:
             return outputs
