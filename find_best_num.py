@@ -361,12 +361,12 @@ def main() -> None:
         print(f"{'='*60}")
 
         # ---------------------------------------------------------------------
-        # Split Coventry data: 20% test, then 20% of remaining for validation
+        # Split Coventry data: 30% test, then 20% of remaining for validation
         # ---------------------------------------------------------------------
         cov_indices = np.arange(n_cov)
         np.random.shuffle(cov_indices)
 
-        cov_test_size = int(n_cov * 0.2)
+        cov_test_size = int(n_cov * 0.3)
         cov_test_indices = cov_indices[:cov_test_size]
         cov_remain_indices = cov_indices[cov_test_size:]
 
@@ -375,12 +375,12 @@ def main() -> None:
         cov_train_indices = cov_remain_indices[cov_val_size:]
 
         # ---------------------------------------------------------------------
-        # Split Infra data: 20% test, then 20% of remaining for validation
+        # Split Infra data: 30% test, then 20% of remaining for validation
         # ---------------------------------------------------------------------
         infra_indices = np.arange(n_infra)
         np.random.shuffle(infra_indices)
 
-        infra_test_size = int(n_infra * 0.2)
+        infra_test_size = int(n_infra * 0.3)
         infra_test_indices = infra_indices[:infra_test_size]
         infra_remain_indices = infra_indices[infra_test_size:]
 
